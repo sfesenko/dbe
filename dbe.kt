@@ -37,16 +37,20 @@ data class QueryResult(
 
 // ── Configuration Loading ───────────────────────────────────────────────────────
 
-fun resolveConfigPath(): File {
-    // Look for databases.json next to the script, then in current directory
-    val scriptDir = File(object {}.javaClass.protectionDomain.codeSource?.location?.toURI()?.path ?: ".").parentFile
-    val candidates = listOfNotNull(
-        scriptDir?.let { File(it, "databases.json") },
-        File("databases.json"),
-        File(System.getProperty("user.home"), ".dbe/databases.json")
+fun configSearchDirs(): List<File> {
+    val home = System.getProperty("user.home")
+    return listOf(
+        File(home, "work/notes"),
+        File(home),
+        File(".")
     )
-    return candidates.firstOrNull { it.exists() }
-        ?: error("Configuration file 'databases.json' not found.\nSearched in:\n${candidates.joinToString("\n") { "  - ${it.absolutePath}" }}")
+}
+
+fun findConfigFiles(): List<File> {
+    return configSearchDirs()
+        .map { File(it, "databases.json").canonicalFile }
+        .distinct()
+        .filter { it.exists() }
 }
 
 fun loadConfig(configFile: File): DatabasesFile {
@@ -54,8 +58,40 @@ fun loadConfig(configFile: File): DatabasesFile {
     try {
         return mapper.readValue<DatabasesFile>(configFile)
     } catch (e: Exception) {
-        error("Failed to parse '${configFile.absolutePath}':\n${e.message}\n\nExpected format:\n{\n  \"databases\": {\n    \"mydb\": {\n      \"jdbcUrl\": \"jdbc:...\",\n      \"username\": \"...\",\n      \"password\": \"...\",\n      \"driverClass\": \"...\",\n      \"driverJar\": \"/path/to/driver.jar\"\n    }\n  }\n}")
+        System.err.println("Warning: Failed to parse '${configFile.absolutePath}': ${e.message}")
+        return DatabasesFile(emptyMap())
     }
+}
+
+/**
+ * Loads and merges databases from all found databases.json files.
+ * Files are loaded in order: ~/work/notes, ~, current dir.
+ * Later files override earlier ones (so current dir wins).
+ * Warnings are printed to stderr for collisions.
+ */
+fun loadMergedConfig(): Map<String, DatabaseConfig> {
+    val configFiles = findConfigFiles()
+    if (configFiles.isEmpty()) {
+        val searched = configSearchDirs().map { File(it, "databases.json").canonicalPath }
+        error("No databases.json found.\nSearched in:\n${searched.joinToString("\n") { "  - $it" }}")
+    }
+
+    val merged = mutableMapOf<String, DatabaseConfig>()
+    val sourceOf = mutableMapOf<String, String>()  // dbName -> file path that defined it
+
+    for (file in configFiles) {
+        val config = loadConfig(file)
+        for ((name, dbConfig) in config.databases) {
+            val prev = sourceOf[name]
+            if (prev != null) {
+                System.err.println("Warning: Database '$name' in ${file.path} overrides definition from $prev")
+            }
+            merged[name] = dbConfig
+            sourceOf[name] = file.path
+        }
+    }
+
+    return merged
 }
 
 // ── JDBC Driver Loading ─────────────────────────────────────────────────────────
@@ -277,10 +313,10 @@ fun printUsage() {
         |  dbe.kt mymysql "SELECT id, name FROM products LIMIT 10" csv
         |
         |Configuration:
-        |  databases.json is searched in:
-        |    1. Same directory as the script
-        |    2. Current working directory
-        |    3. ~/.dbe/databases.json
+        |  databases.json is searched and merged from (later overrides earlier):
+        |    1. ~/work/notes/databases.json
+        |    2. ~/databases.json
+        |    3. ./databases.json (current directory)
     """.trimMargin())
 }
 
@@ -309,14 +345,13 @@ fun main(args: Array<String>) {
     }
 
     try {
-        // Load configuration
-        val configFile = resolveConfigPath()
-        val config = loadConfig(configFile)
+        // Load and merge configuration from all databases.json files
+        val databases = loadMergedConfig()
 
         // Find database
-        val dbConfig = config.databases[dbName] ?: run {
-            val available = config.databases.keys.sorted().joinToString(", ")
-            System.err.println("Error: Database '$dbName' not found in ${configFile.name}.\nAvailable databases: $available")
+        val dbConfig = databases[dbName] ?: run {
+            val available = databases.keys.sorted().joinToString(", ")
+            System.err.println("Error: Database '$dbName' not found.\nAvailable databases: $available")
             System.exit(1)
             return  // unreachable, but satisfies compiler
         }
