@@ -1,4 +1,4 @@
-///usr/bin/env jbang "$0" "$@" ; exit $?
+///usr/bin/env bash -c 'export DBE_HOME="$(cd "$(dirname "$1")" && pwd)" && exec jbang "$@"' _ "$0" "$@" ; exit $?
 
 //DEPS com.fasterxml.jackson.core:jackson-databind:2.17.0
 //DEPS com.fasterxml.jackson.module:jackson-module-kotlin:2.17.0
@@ -37,11 +37,30 @@ data class QueryResult(
 
 // ── Configuration Loading ───────────────────────────────────────────────────────
 
+/**
+ * Resolve the directory where dbe.kt lives.
+ * 1. DBE_HOME env var (set automatically by the shebang, or manually)
+ * 2. Search PATH for dbe.kt (covers `jbang dbe.kt` when script is in PATH)
+ */
+fun scriptDir(): File? {
+    // 1. Env var (set by shebang or user)
+    System.getenv("DBE_HOME")?.let { return File(it) }
+
+    // 2. Search PATH
+    val path = System.getenv("PATH") ?: return null
+    for (dir in path.split(File.pathSeparator)) {
+        val candidate = File(dir, "dbe.kt")
+        if (candidate.exists()) return File(dir)
+    }
+    return null
+}
+
 fun configSearchDirs(): List<File> {
     val home = System.getProperty("user.home")
-    return listOf(
+    return listOfNotNull(
         File(home, "work/notes"),
         File(home),
+        scriptDir(),
         File(".")
     )
 }
@@ -316,7 +335,8 @@ fun printUsage() {
         |  databases.json is searched and merged from (later overrides earlier):
         |    1. ~/work/notes/databases.json
         |    2. ~/databases.json
-        |    3. ./databases.json (current directory)
+        |    3. <dbe.kt dir>/databases.json  (auto-detected or DBE_HOME)
+        |    4. ./databases.json (current directory)
     """.trimMargin())
 }
 
