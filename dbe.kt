@@ -162,7 +162,7 @@ fun executeQuery(connection: Connection, query: String): QueryResult {
 
         while (rs.next()) {
             val row = (1..columnCount).map { i ->
-                readColumnValue(rs, i, meta.getColumnType(i))
+                readColumnValue(rs, i, meta.getColumnType(i), meta.getColumnTypeName(i))
             }
             rows.add(row)
         }
@@ -179,7 +179,9 @@ fun executeQuery(connection: Connection, query: String): QueryResult {
     }
 }
 
-fun readColumnValue(rs: ResultSet, index: Int, sqlType: Int): Any? {
+private val jsonMapper = jacksonObjectMapper()
+
+fun readColumnValue(rs: ResultSet, index: Int, sqlType: Int, typeName: String): Any? {
     val value = when (sqlType) {
         Types.INTEGER, Types.SMALLINT, Types.TINYINT -> rs.getObject(index)?.let { (it as Number).toInt() }
         Types.BIGINT -> rs.getObject(index)?.let { (it as Number).toLong() }
@@ -193,6 +195,13 @@ fun readColumnValue(rs: ResultSet, index: Int, sqlType: Int): Any? {
         Types.BLOB, Types.BINARY, Types.VARBINARY, Types.LONGVARBINARY -> rs.getBytes(index)?.let { "<binary ${it.size} bytes>" }
         Types.CLOB, Types.NCLOB -> rs.getClob(index)?.characterStream?.readText()
         Types.NULL -> null
+        Types.OTHER -> {
+            if (typeName.equals("json", ignoreCase = true) || typeName.equals("jsonb", ignoreCase = true)) {
+                rs.getString(index)?.let { jsonMapper.readTree(it) }
+            } else {
+                rs.getString(index)
+            }
+        }
         else -> rs.getString(index)
     }
     return if (rs.wasNull()) null else value
