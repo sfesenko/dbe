@@ -32,7 +32,7 @@ val listDatabasesTool = SyncToolSpecification.builder()
     .tool(
         Tool.builder()
             .name("list_databases")
-            .description("List all configured database connection names")
+            .description("List all configured databases, including their SQL dialect when available")
             .inputSchema(mcpJsonMapper, """{ "type": "object", "properties": {} }""")
             .build()
     )
@@ -40,7 +40,17 @@ val listDatabasesTool = SyncToolSpecification.builder()
         try {
             val databases = loadMergedConfig()
             val names = databases.keys.sorted()
-            val text = prettyMapper.writeValueAsString(mapOf("databases" to names))
+            val details = names.associateWith { name ->
+                mapOf(
+                    "dialect" to databases.getValue(name).resolvedDialect()
+                )
+            }
+            val text = prettyMapper.writeValueAsString(
+                mapOf(
+                    "databases" to names,
+                    "databaseDetails" to details
+                )
+            )
             CallToolResult.builder().addTextContent(text).build()
         } catch (e: Exception) {
             CallToolResult.builder().addTextContent("Error: ${e.message}").isError(true).build()
@@ -54,7 +64,7 @@ val queryTool = SyncToolSpecification.builder()
     .tool(
         Tool.builder()
             .name("query")
-            .description("Execute a SQL query against a configured database")
+            .description("Execute a SQL query against a configured database. Call list_databases first to discover the SQL dialect when needed.")
             .inputSchema(mcpJsonMapper, """
                 {
                   "type": "object",

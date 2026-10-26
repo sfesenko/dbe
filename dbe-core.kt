@@ -16,7 +16,8 @@ data class DatabaseConfig(
     val username: String,
     val password: String,
     val driverClass: String,
-    val driverJar: String
+    val driverJar: String,
+    val dialect: String? = null
 )
 
 data class DatabasesFile(
@@ -27,6 +28,29 @@ data class QueryResult(
     val columns: List<String>,
     val rows: List<List<Any?>>
 )
+
+fun DatabaseConfig.resolvedDialect(): String? {
+    val configuredDialect = dialect
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?.lowercase()
+    return configuredDialect ?: inferDialect(jdbcUrl, driverClass)
+}
+
+private fun inferDialect(jdbcUrl: String, driverClass: String): String? {
+    val candidates = listOf(jdbcUrl, driverClass).map { it.lowercase() }
+    return when {
+        candidates.any { it.contains("redshift") } -> "redshift"
+        candidates.any { it.contains("postgresql") || it.contains(":postgres:") } -> "postgresql"
+        candidates.any { it.contains("mariadb") } -> "mariadb"
+        candidates.any { it.contains("mysql") } -> "mysql"
+        candidates.any { it.contains("oracle") } -> "oracle"
+        candidates.any { it.contains("sqlserver") || it.contains("microsoft.sqlserver") } -> "sqlserver"
+        candidates.any { it.contains("sqlite") } -> "sqlite"
+        candidates.any { it.contains(":h2:") || it.contains("org.h2") } -> "h2"
+        else -> null
+    }
+}
 
 // ── Configuration Loading ───────────────────────────────────────────────────────
 

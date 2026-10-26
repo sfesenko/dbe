@@ -122,6 +122,7 @@ fun formatOutput(result: QueryResult, format: String): String {
 fun printUsage() {
     System.err.println("""
         |Usage: dbe.kt <database> <query> [format]
+        |       dbe.kt --list
         |
         |Arguments:
         |  database  Name of the database (as defined in databases.json)
@@ -132,6 +133,7 @@ fun printUsage() {
         |  dbe.kt mypostgres "SELECT * FROM users"
         |  dbe.kt mypostgres "SELECT * FROM users" json
         |  dbe.kt mymysql "SELECT id, name FROM products LIMIT 10" csv
+        |  dbe.kt --list
         |
         |Configuration:
         |  databases.json is searched and merged from (later overrides earlier):
@@ -142,12 +144,36 @@ fun printUsage() {
     """.trimMargin())
 }
 
+fun printDatabaseList(databases: Map<String, DatabaseConfig>) {
+    if (databases.isEmpty()) {
+        println("No databases configured.")
+        return
+    }
+
+    val names = databases.keys.sorted()
+    val maxNameLength = names.maxOf { it.length }
+    for (name in names) {
+        val dialect = databases.getValue(name).resolvedDialect() ?: "unknown"
+        println("${name.padEnd(maxNameLength)}  dialect=$dialect")
+    }
+}
+
 // ── Main ────────────────────────────────────────────────────────────────────────
 
 fun main(args: Array<String>) {
     if (args.isEmpty() || args[0] in listOf("-h", "--help", "help")) {
         printUsage()
         System.exit(if (args.isEmpty()) 1 else 0)
+    }
+
+    if (args.size >= 1 && args[0] in listOf("--list", "list")) {
+        try {
+            printDatabaseList(loadMergedConfig())
+        } catch (e: IllegalStateException) {
+            System.err.println("Error: ${e.message}")
+            System.exit(1)
+        }
+        return
     }
 
     if (args.size < 2) {
@@ -169,8 +195,9 @@ fun main(args: Array<String>) {
         val databases = loadMergedConfig()
 
         val dbConfig = databases[dbName] ?: run {
-            val available = databases.keys.sorted().joinToString(", ")
-            System.err.println("Error: Database '$dbName' not found.\nAvailable databases: $available")
+            System.err.println("Error: Database '$dbName' not found.\n")
+            System.err.println("Available databases:")
+            printDatabaseList(databases)
             System.exit(1)
             return
         }
