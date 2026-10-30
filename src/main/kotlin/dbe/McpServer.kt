@@ -88,13 +88,22 @@ private val queryTool = SyncToolSpecification.builder()
                 ?: return@callHandler CallToolResult.builder()
                     .addTextContent("Error: 'sql' argument is required").isError(true).build()
 
-            val databases = loadMergedConfig()
+            val diagnostic = inspectConfig()
+            if (diagnostic.sources.isEmpty()) {
+                return@callHandler CallToolResult.builder()
+                    .addTextContent(
+                        "Error: No databases.json found.\nSearched in:\n" +
+                            diagnostic.searchedPaths.joinToString("\n") { "  - $it" }
+                    )
+                    .isError(true).build()
+            }
+            val databases = diagnostic.databases
             val dbConfig = databases[database]
                 ?: return@callHandler CallToolResult.builder()
                     .addTextContent("Error: Database '$database' not found. Available: ${databases.keys.sorted().joinToString(", ")}")
                     .isError(true).build()
 
-            loadDriver(dbConfig.driverJar, dbConfig.driverClass)
+            loadDriver(database, dbConfig, diagnostic.sourceOf[database])
 
             val result = connect(dbConfig).use { connection ->
                 executeQuery(connection, sql)

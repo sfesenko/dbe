@@ -73,9 +73,10 @@ private fun inferDialect(jdbcUrl: String, driverClass: String): String? {
 // ── Configuration Loading ───────────────────────────────────────────────────────
 
 /**
- * Resolve the directory where the dbe jar lives.
+ * Resolve the directory where the dbe app lives (for databases.json next to the install).
  * 1. DBE_HOME env var (set manually or by wrapper script)
  * 2. The directory containing the running jar/classes
+ *    If the jar is under Maven's `target/`, use the module root (parent of target).
  */
 fun scriptDir(): File? {
     System.getenv("DBE_HOME")
@@ -87,7 +88,8 @@ fun scriptDir(): File? {
         val location = File(
             object {}.javaClass.protectionDomain.codeSource.location.toURI()
         )
-        if (location.isDirectory) location else location.parentFile
+        val dir = if (location.isDirectory) location else location.parentFile
+        if (dir != null && dir.name == "target") dir.parentFile else dir
     }.getOrNull()
 }
 
@@ -147,6 +149,15 @@ private fun expandJdbcUrl(value: String): String {
     return value
 }
 
+private fun displayPath(path: String): String {
+    val home = System.getProperty("user.home")
+    return when {
+        path == home -> "~"
+        path.startsWith("$home/") || path.startsWith("$home\\") -> "~" + path.substring(home.length)
+        else -> path
+    }
+}
+
 private fun normalizeConfig(config: DatabaseConfig): DatabaseConfig {
     return config.copy(
         jdbcUrl = expandJdbcUrl(config.jdbcUrl),
@@ -165,17 +176,35 @@ fun inspectConfig(): ConfigDiagnostic {
             val config = parseConfig(file)
             val names = config.databases.keys.sorted()
             sources += ConfigSourceDiagnostic(file.path, names)
+
+            // name -> missing driverJar path
+            val missingDrivers = linkedMapOf<String, MutableList<String>>()
+
             for ((name, rawConfig) in config.databases) {
+                val normalized = normalizeConfig(rawConfig)
+                val jarFile = File(normalized.driverJar)
+                if (!jarFile.exists()) {
+                    missingDrivers
+                        .getOrPut(jarFile.absolutePath) { mutableListOf() }
+                        .add(name)
+                }
                 if (sourceOf.containsKey(name)) {
                     System.err.println(
-                        "Warning: Database '$name' in ${file.path} overrides definition from ${sourceOf[name]}"
+                        "Warning: '$name' overridden by ${displayPath(file.path)} (was ${displayPath(sourceOf.getValue(name))})"
                     )
                 }
-                merged[name] = normalizeConfig(rawConfig)
+                merged[name] = normalized
                 sourceOf[name] = file.path
             }
+
+            for ((jarPath, dbNames) in missingDrivers) {
+                System.err.println(
+                    "Warning: ${displayPath(file.path)} — missing driverJar for ${dbNames.sorted().joinToString(", ")}"
+                )
+                System.err.println("  ${displayPath(jarPath)}")
+            }
         } catch (e: Exception) {
-            System.err.println("Warning: Failed to parse '${file.absolutePath}': ${e.message}")
+            System.err.println("Warning: Failed to parse '${displayPath(file.absolutePath)}': ${e.message}")
             sources += ConfigSourceDiagnostic(
                 path = file.path,
                 databaseNames = emptyList(),
@@ -234,12 +263,21 @@ private data class LoadedDriver(
 private val loadedDrivers = ConcurrentHashMap<String, LoadedDriver>()
 
 @Synchronized
-fun loadDriver(jarPath: String, driverClass: String) {
-    val jarFile = File(jarPath)
+fun loadDriver(
+    databaseName: String,
+    config: DatabaseConfig,
+    configFile: String? = null
+) {
+    val jarFile = File(config.driverJar)
     if (!jarFile.exists()) {
-        error("JDBC driver JAR not found: ${jarFile.absolutePath}\nPlease verify the 'driverJar' path in databases.json")
+        val source = configFile ?: "databases.json"
+        error(
+            "driverJar not found for '$databaseName'\n" +
+                "  file: ${displayPath(source)}\n" +
+                "  jar:  ${displayPath(jarFile.absolutePath)}"
+        )
     }
-    val key = "${jarFile.canonicalPath}|$driverClass"
+    val key = "${jarFile.canonicalPath}|${config.driverClass}"
     if (loadedDrivers.containsKey(key)) return
 
     val classLoader = URLClassLoader(
@@ -247,7 +285,7 @@ fun loadDriver(jarPath: String, driverClass: String) {
         ClassLoader.getSystemClassLoader()
     )
     try {
-        val driverInstance = Class.forName(driverClass, true, classLoader)
+        val driverInstance = Class.forName(config.driverClass, true, classLoader)
             .getDeclaredConstructor()
             .newInstance() as Driver
         val shim = DriverShim(driverInstance)

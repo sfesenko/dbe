@@ -7,7 +7,8 @@ import java.sql.SQLException
 
 private fun printUsage() {
     System.err.println("""
-        |Usage: dbe <database> <query> [--format table|json|csv]
+        |Usage: dbe <database> <query> [json|csv|table]
+        |       dbe <database> <query> [--format table|json|csv]
         |       dbe --list
         |       dbe --diagnose
         |       dbe --show-skill
@@ -23,11 +24,13 @@ private fun printUsage() {
         |
         |Options:
         |  --format <format>    Output format: table (default), json, csv
+        |                       Also accepted as a trailing positional arg: json|csv|table
         |
         |Examples:
         |  dbe mypostgres "SELECT * FROM users"
+        |  dbe mypostgres "SELECT * FROM users" json
         |  dbe mypostgres "SELECT * FROM users" --format json
-        |  dbe mymysql "SELECT id, name FROM products LIMIT 10" --format csv
+        |  dbe mymysql "SELECT id, name FROM products LIMIT 10" csv
         |  dbe --list
         |  dbe --mcp
         |
@@ -128,19 +131,29 @@ private fun printDatabaseList(databases: Map<String, DatabaseConfig>) {
 
 // ── Argument Parsing ────────────────────────────────────────────────────────────
 
+private val supportedFormats = setOf("json", "csv", "table")
+
 private fun parseFormat(args: Array<String>): String {
     val idx = args.indexOf("--format")
-    if (idx == -1) return "table"
-    if (idx + 1 >= args.size) {
-        System.err.println("Error: --format requires a value (table, json, csv)")
-        System.exit(1)
+    if (idx != -1) {
+        if (idx + 1 >= args.size) {
+            System.err.println("Error: --format requires a value (table, json, csv)")
+            System.exit(1)
+        }
+        val format = args[idx + 1]
+        if (format.lowercase() !in supportedFormats) {
+            System.err.println("Error: Unknown output format '$format'. Supported formats: json, csv, table")
+            System.exit(1)
+        }
+        return format.lowercase()
     }
-    val format = args[idx + 1]
-    if (format.lowercase() !in listOf("json", "csv", "table")) {
-        System.err.println("Error: Unknown output format '$format'. Supported formats: json, csv, table")
-        System.exit(1)
+
+    // Legacy: dbe <database> <query> [json|csv|table]
+    val positional = positionalArgs(args)
+    if (positional.size >= 3 && positional[2].lowercase() in supportedFormats) {
+        return positional[2].lowercase()
     }
-    return format
+    return "table"
 }
 
 /**
@@ -158,6 +171,19 @@ private fun positionalArgs(args: Array<String>): List<String> {
         }
     }
     return result
+}
+
+private fun queryPositional(args: Array<String>): Pair<String, String> {
+    val positional = positionalArgs(args).toMutableList()
+    if (positional.size >= 3 && positional[2].lowercase() in supportedFormats) {
+        positional.removeAt(2)
+    }
+    if (positional.size < 2) {
+        System.err.println("Error: Missing required arguments.\n")
+        printUsage()
+        System.exit(1)
+    }
+    return positional[0] to positional[1]
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────────
@@ -205,21 +231,19 @@ fun main(args: Array<String>) {
         return
     }
 
-    // Query mode: <database> <query> [--format <format>]
+    // Query mode: <database> <query> [json|csv|table] or --format <format>
     val format = parseFormat(args)
-    val positional = positionalArgs(args)
-
-    if (positional.size < 2) {
-        System.err.println("Error: Missing required arguments.\n")
-        printUsage()
-        System.exit(1)
-    }
-
-    val dbName = positional[0]
-    val query = positional[1]
+    val (dbName, query) = queryPositional(args)
 
     try {
-        val databases = loadMergedConfig()
+        val diagnostic = inspectConfig()
+        if (diagnostic.sources.isEmpty()) {
+            error(
+                "No databases.json found.\nSearched in:\n" +
+                    diagnostic.searchedPaths.joinToString("\n") { "  - $it" }
+            )
+        }
+        val databases = diagnostic.databases
 
         val dbConfig = databases[dbName] ?: run {
             System.err.println("Error: Database '$dbName' not found.\n")
@@ -229,7 +253,7 @@ fun main(args: Array<String>) {
             return
         }
 
-        loadDriver(dbConfig.driverJar, dbConfig.driverClass)
+        loadDriver(dbName, dbConfig, diagnostic.sourceOf[dbName])
 
         connect(dbConfig).use { connection ->
             val result = executeQuery(connection, query)

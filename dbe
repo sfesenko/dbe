@@ -1,10 +1,45 @@
 #!/usr/bin/env sh
+set -eu
 
-APP_JAR="~/dbe/target/dbe-1.0-SNAPSHOT.jar"
+# Resolve the real location of this script, following symlinks so that a
+# symlink placed in PATH still finds the JAR next to the real script.
+SOURCE="$0"
+while [ -L "$SOURCE" ]; do
+  DIR=$(cd "$(dirname "$SOURCE")" && pwd)
+  SOURCE=$(readlink "$SOURCE")
+  case "$SOURCE" in
+    /*) ;;
+    *) SOURCE="$DIR/$SOURCE" ;;
+  esac
+done
+SCRIPT_DIR=$(cd "$(dirname "$SOURCE")" && pwd)
 
-if [ -f "$APP_JAR" ]; then
-  exec java -jar "$APP_JAR" "$@"
-else
-  echo "Error: JAR not found: $APP_JAR" >&2
+# An explicit DBE_JAR always wins; otherwise look for the JAR next to the
+# script (source checkout target/ or an installed layout).
+JAR="${DBE_JAR:-}"
+if [ -z "$JAR" ] || [ ! -f "$JAR" ]; then
+  JAR=""
+  for cand in \
+    "$SCRIPT_DIR/target/dbe-1.0-SNAPSHOT.jar" \
+    "$SCRIPT_DIR/dbe-1.0-SNAPSHOT.jar" \
+    "$SCRIPT_DIR/dbe.jar" \
+    "$SCRIPT_DIR/../lib/dbe.jar"; do
+    if [ -f "$cand" ]; then
+      JAR="$cand"
+      break
+    fi
+  done
+fi
+
+if [ -z "$JAR" ]; then
+  echo "Error: dbe JAR not found." >&2
+  echo "  Set DBE_JAR=/path/to/dbe.jar, or place the jar next to this script." >&2
   exit 1
 fi
+
+if ! command -v java >/dev/null 2>&1; then
+  echo "Error: 'java' not found on PATH." >&2
+  exit 1
+fi
+
+exec java -jar "$JAR" "$@"
