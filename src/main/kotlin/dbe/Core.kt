@@ -55,7 +55,7 @@ fun DatabaseConfig.resolvedDialect(): String? {
     return configuredDialect ?: inferDialect(jdbcUrl, driverClass)
 }
 
-private fun inferDialect(jdbcUrl: String, driverClass: String): String? {
+internal fun inferDialect(jdbcUrl: String, driverClass: String): String? {
     val candidates = listOf(jdbcUrl, driverClass).map { it.lowercase() }
     return when {
         candidates.any { it.contains("redshift") } -> "redshift"
@@ -113,7 +113,7 @@ private fun configSearchPaths(): List<File> {
         .distinct()
 }
 
-private fun parseConfig(configFile: File): DatabasesFile {
+internal fun parseConfig(configFile: File): DatabasesFile {
     val mapper = jacksonObjectMapper()
     return mapper.readValue<DatabasesFile>(configFile)
 }
@@ -127,7 +127,7 @@ fun loadConfig(configFile: File): DatabasesFile {
     }
 }
 
-private fun expandTilde(value: String): String {
+internal fun expandTilde(value: String): String {
     val home = System.getProperty("user.home")
     return when {
         value == "~" -> home
@@ -136,7 +136,7 @@ private fun expandTilde(value: String): String {
     }
 }
 
-private fun expandJdbcUrl(value: String): String {
+internal fun expandJdbcUrl(value: String): String {
     val expanded = expandTilde(value)
     if (expanded != value) return expanded
 
@@ -149,7 +149,7 @@ private fun expandJdbcUrl(value: String): String {
     return value
 }
 
-private fun displayPath(path: String): String {
+internal fun displayPath(path: String): String {
     val home = System.getProperty("user.home")
     return when {
         path == home -> "~"
@@ -158,15 +158,18 @@ private fun displayPath(path: String): String {
     }
 }
 
-private fun normalizeConfig(config: DatabaseConfig): DatabaseConfig {
+internal fun normalizeConfig(config: DatabaseConfig): DatabaseConfig {
     return config.copy(
         jdbcUrl = expandJdbcUrl(config.jdbcUrl),
         driverJar = expandTilde(config.driverJar)
     )
 }
 
-fun inspectConfig(): ConfigDiagnostic {
-    val searchedPaths = configSearchPaths()
+fun inspectConfig(): ConfigDiagnostic =
+    inspectConfig(configSearchPaths())
+
+fun inspectConfig(searchPaths: List<File>): ConfigDiagnostic {
+    val searchedPaths = searchPaths.map { it.canonicalFile }.distinct()
     val sources = mutableListOf<ConfigSourceDiagnostic>()
     val merged = linkedMapOf<String, DatabaseConfig>()
     val sourceOf = linkedMapOf<String, String>()

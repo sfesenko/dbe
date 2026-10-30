@@ -131,19 +131,19 @@ private fun printDatabaseList(databases: Map<String, DatabaseConfig>) {
 
 // ── Argument Parsing ────────────────────────────────────────────────────────────
 
-private val supportedFormats = setOf("json", "csv", "table")
+internal val supportedFormats = setOf("json", "csv", "table")
 
-private fun parseFormat(args: Array<String>): String {
+internal class ArgParseException(message: String) : RuntimeException(message)
+
+internal fun parseFormat(args: Array<String>): String {
     val idx = args.indexOf("--format")
     if (idx != -1) {
         if (idx + 1 >= args.size) {
-            System.err.println("Error: --format requires a value (table, json, csv)")
-            System.exit(1)
+            throw ArgParseException("--format requires a value (table, json, csv)")
         }
         val format = args[idx + 1]
         if (format.lowercase() !in supportedFormats) {
-            System.err.println("Error: Unknown output format '$format'. Supported formats: json, csv, table")
-            System.exit(1)
+            throw ArgParseException("Unknown output format '$format'. Supported formats: json, csv, table")
         }
         return format.lowercase()
     }
@@ -159,7 +159,7 @@ private fun parseFormat(args: Array<String>): String {
 /**
  * Collect positional arguments (everything that is not --format/--format's value).
  */
-private fun positionalArgs(args: Array<String>): List<String> {
+internal fun positionalArgs(args: Array<String>): List<String> {
     val result = mutableListOf<String>()
     var i = 0
     while (i < args.size) {
@@ -173,15 +173,13 @@ private fun positionalArgs(args: Array<String>): List<String> {
     return result
 }
 
-private fun queryPositional(args: Array<String>): Pair<String, String> {
+internal fun queryPositional(args: Array<String>): Pair<String, String> {
     val positional = positionalArgs(args).toMutableList()
     if (positional.size >= 3 && positional[2].lowercase() in supportedFormats) {
         positional.removeAt(2)
     }
     if (positional.size < 2) {
-        System.err.println("Error: Missing required arguments.\n")
-        printUsage()
-        System.exit(1)
+        throw ArgParseException("Missing required arguments.")
     }
     return positional[0] to positional[1]
 }
@@ -232,8 +230,20 @@ fun main(args: Array<String>) {
     }
 
     // Query mode: <database> <query> [json|csv|table] or --format <format>
-    val format = parseFormat(args)
-    val (dbName, query) = queryPositional(args)
+    val format: String
+    val dbName: String
+    val query: String
+    try {
+        format = parseFormat(args)
+        val (d, q) = queryPositional(args)
+        dbName = d
+        query = q
+    } catch (e: ArgParseException) {
+        System.err.println("Error: ${e.message}\n")
+        printUsage()
+        System.exit(1)
+        return
+    }
 
     try {
         val diagnostic = inspectConfig()

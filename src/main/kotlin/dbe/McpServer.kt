@@ -127,7 +127,7 @@ private val queryTool = SyncToolSpecification.builder()
 
 // ── Entry Point ─────────────────────────────────────────────────────────────────
 
-private class EofAwareInputStream(
+internal class EofAwareInputStream(
     private val delegate: InputStream,
     private val onEof: () -> Unit
 ) : InputStream() {

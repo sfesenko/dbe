@@ -24,7 +24,9 @@ fun formatCsv(result: QueryResult): String {
     for (row in result.rows) {
         sb.appendLine(row.joinToString(",") { escapeCsvField(it?.toString() ?: "") })
     }
-    return sb.toString().trimEnd()
+    // Remove only the final line terminator; trimEnd() would also strip
+    // legitimate trailing whitespace from the last field.
+    return sb.toString().removeSuffix("\n").removeSuffix("\r")
 }
 
 fun escapeCsvField(field: String): String {
@@ -44,6 +46,7 @@ fun formatTable(result: QueryResult): String {
     val reset = if (isTTY) "\u001b[0m" else ""
 
     val nullStr = if (isTTY) "${dim}∅${reset}" else "∅"
+    // Must stay in sync with the display width of the null marker above.
     val nullDisplayLen = 1
 
     if (result.rows.isEmpty()) {
