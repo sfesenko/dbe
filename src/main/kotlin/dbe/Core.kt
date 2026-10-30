@@ -1,3 +1,5 @@
+package dbe
+
 import tools.jackson.module.kotlin.jacksonObjectMapper
 import tools.jackson.module.kotlin.readValue
 import java.io.File
@@ -7,7 +9,10 @@ import java.sql.Driver
 import java.sql.DriverManager
 import java.sql.ResultSet
 import java.sql.Types
+import java.util.concurrent.ConcurrentHashMap
 import java.util.Properties
+
+const val APP_VERSION = "1.0.0"
 
 // ── Data Classes ────────────────────────────────────────────────────────────────
 
@@ -27,6 +32,19 @@ data class DatabasesFile(
 data class QueryResult(
     val columns: List<String>,
     val rows: List<List<Any?>>
+)
+
+data class ConfigSourceDiagnostic(
+    val path: String,
+    val databaseNames: List<String>,
+    val parseError: String? = null
+)
+
+data class ConfigDiagnostic(
+    val searchedPaths: List<String>,
+    val sources: List<ConfigSourceDiagnostic>,
+    val databases: Map<String, DatabaseConfig>,
+    val sourceOf: Map<String, String>
 )
 
 fun DatabaseConfig.resolvedDialect(): String? {
@@ -55,19 +73,22 @@ private fun inferDialect(jdbcUrl: String, driverClass: String): String? {
 // ── Configuration Loading ───────────────────────────────────────────────────────
 
 /**
- * Resolve the directory where dbe.kt lives.
- * 1. DBE_HOME env var (set automatically by the shebang, or manually)
- * 2. Search PATH for dbe.kt (covers `jbang dbe.kt` when script is in PATH)
+ * Resolve the directory where the dbe jar lives.
+ * 1. DBE_HOME env var (set manually or by wrapper script)
+ * 2. The directory containing the running jar/classes
  */
 fun scriptDir(): File? {
-    System.getenv("DBE_HOME")?.let { return File(it) }
+    System.getenv("DBE_HOME")
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?.let { return File(it) }
 
-    val path = System.getenv("PATH") ?: return null
-    for (dir in path.split(File.pathSeparator)) {
-        val candidate = File(dir, "dbe.kt")
-        if (candidate.exists()) return File(dir)
-    }
-    return null
+    return runCatching {
+        val location = File(
+            object {}.javaClass.protectionDomain.codeSource.location.toURI()
+        )
+        if (location.isDirectory) location else location.parentFile
+    }.getOrNull()
 }
 
 fun configSearchDirs(): List<File> {
@@ -81,20 +102,94 @@ fun configSearchDirs(): List<File> {
 }
 
 fun findConfigFiles(): List<File> {
+    return configSearchPaths().filter { it.exists() }
+}
+
+private fun configSearchPaths(): List<File> {
     return configSearchDirs()
         .map { File(it, "databases.json").canonicalFile }
         .distinct()
-        .filter { it.exists() }
+}
+
+private fun parseConfig(configFile: File): DatabasesFile {
+    val mapper = jacksonObjectMapper()
+    return mapper.readValue<DatabasesFile>(configFile)
 }
 
 fun loadConfig(configFile: File): DatabasesFile {
-    val mapper = jacksonObjectMapper()
-    try {
-        return mapper.readValue<DatabasesFile>(configFile)
+    return try {
+        parseConfig(configFile)
     } catch (e: Exception) {
         System.err.println("Warning: Failed to parse '${configFile.absolutePath}': ${e.message}")
-        return DatabasesFile(emptyMap())
+        DatabasesFile(emptyMap())
     }
+}
+
+private fun expandTilde(value: String): String {
+    val home = System.getProperty("user.home")
+    return when {
+        value == "~" -> home
+        value.startsWith("~/") -> home + value.substring(1)
+        else -> value
+    }
+}
+
+private fun expandJdbcUrl(value: String): String {
+    val expanded = expandTilde(value)
+    if (expanded != value) return expanded
+
+    val marker = value.indexOf(":~")
+    if (marker >= 0 && (value.length == marker + 2 || value[marker + 2] == '/')) {
+        return value.substring(0, marker + 1) +
+            System.getProperty("user.home") +
+            value.substring(marker + 2)
+    }
+    return value
+}
+
+private fun normalizeConfig(config: DatabaseConfig): DatabaseConfig {
+    return config.copy(
+        jdbcUrl = expandJdbcUrl(config.jdbcUrl),
+        driverJar = expandTilde(config.driverJar)
+    )
+}
+
+fun inspectConfig(): ConfigDiagnostic {
+    val searchedPaths = configSearchPaths()
+    val sources = mutableListOf<ConfigSourceDiagnostic>()
+    val merged = linkedMapOf<String, DatabaseConfig>()
+    val sourceOf = linkedMapOf<String, String>()
+
+    for (file in searchedPaths.filter { it.exists() }) {
+        try {
+            val config = parseConfig(file)
+            val names = config.databases.keys.sorted()
+            sources += ConfigSourceDiagnostic(file.path, names)
+            for ((name, rawConfig) in config.databases) {
+                if (sourceOf.containsKey(name)) {
+                    System.err.println(
+                        "Warning: Database '$name' in ${file.path} overrides definition from ${sourceOf[name]}"
+                    )
+                }
+                merged[name] = normalizeConfig(rawConfig)
+                sourceOf[name] = file.path
+            }
+        } catch (e: Exception) {
+            System.err.println("Warning: Failed to parse '${file.absolutePath}': ${e.message}")
+            sources += ConfigSourceDiagnostic(
+                path = file.path,
+                databaseNames = emptyList(),
+                parseError = e.message ?: e.javaClass.simpleName
+            )
+        }
+    }
+
+    return ConfigDiagnostic(
+        searchedPaths = searchedPaths.map(File::getPath),
+        sources = sources,
+        databases = merged,
+        sourceOf = sourceOf
+    )
 }
 
 /**
@@ -104,28 +199,14 @@ fun loadConfig(configFile: File): DatabasesFile {
  * Warnings are printed to stderr for collisions.
  */
 fun loadMergedConfig(): Map<String, DatabaseConfig> {
-    val configFiles = findConfigFiles()
-    if (configFiles.isEmpty()) {
-        val searched = configSearchDirs().map { File(it, "databases.json").canonicalPath }
-        error("No databases.json found.\nSearched in:\n${searched.joinToString("\n") { "  - $it" }}")
+    val diagnostic = inspectConfig()
+    if (diagnostic.sources.isEmpty()) {
+        error(
+            "No databases.json found.\nSearched in:\n" +
+                diagnostic.searchedPaths.joinToString("\n") { "  - $it" }
+        )
     }
-
-    val merged = mutableMapOf<String, DatabaseConfig>()
-    val sourceOf = mutableMapOf<String, String>()
-
-    for (file in configFiles) {
-        val config = loadConfig(file)
-        for ((name, dbConfig) in config.databases) {
-            val prev = sourceOf[name]
-            if (prev != null) {
-                System.err.println("Warning: Database '$name' in ${file.path} overrides definition from $prev")
-            }
-            merged[name] = dbConfig
-            sourceOf[name] = file.path
-        }
-    }
-
-    return merged
+    return diagnostic.databases
 }
 
 // ── JDBC Driver Loading ─────────────────────────────────────────────────────────
@@ -145,14 +226,37 @@ class DriverShim(private val driver: Driver) : Driver {
     override fun getParentLogger() = driver.parentLogger
 }
 
+private data class LoadedDriver(
+    val classLoader: URLClassLoader,
+    val shim: DriverShim
+)
+
+private val loadedDrivers = ConcurrentHashMap<String, LoadedDriver>()
+
+@Synchronized
 fun loadDriver(jarPath: String, driverClass: String) {
     val jarFile = File(jarPath)
     if (!jarFile.exists()) {
         error("JDBC driver JAR not found: ${jarFile.absolutePath}\nPlease verify the 'driverJar' path in databases.json")
     }
-    val classLoader = URLClassLoader(arrayOf(jarFile.toURI().toURL()), ClassLoader.getSystemClassLoader())
-    val driverInstance = Class.forName(driverClass, true, classLoader).getDeclaredConstructor().newInstance() as Driver
-    DriverManager.registerDriver(DriverShim(driverInstance))
+    val key = "${jarFile.canonicalPath}|$driverClass"
+    if (loadedDrivers.containsKey(key)) return
+
+    val classLoader = URLClassLoader(
+        arrayOf(jarFile.toURI().toURL()),
+        ClassLoader.getSystemClassLoader()
+    )
+    try {
+        val driverInstance = Class.forName(driverClass, true, classLoader)
+            .getDeclaredConstructor()
+            .newInstance() as Driver
+        val shim = DriverShim(driverInstance)
+        DriverManager.registerDriver(shim)
+        loadedDrivers[key] = LoadedDriver(classLoader, shim)
+    } catch (e: Exception) {
+        classLoader.close()
+        throw e
+    }
 }
 
 // ── Database Connection & Query Execution ───────────────────────────────────────
@@ -162,34 +266,36 @@ fun connect(config: DatabaseConfig): Connection {
 }
 
 fun executeQuery(connection: Connection, query: String): QueryResult {
-    val stmt = connection.createStatement()
-    val trimmedQuery = query.trim()
+    return connection.createStatement().use { stmt ->
+        val isQuery = stmt.execute(query.trim())
 
-    val isQuery = stmt.execute(trimmedQuery)
+        if (isQuery) {
+            val rs = checkNotNull(stmt.resultSet) { "JDBC driver returned no result set" }
+            rs.use { resultSet ->
+                val meta = resultSet.metaData
+                val columnCount = meta.columnCount
+                val columns = (1..columnCount).map { meta.getColumnLabel(it) }
+                val rows = mutableListOf<List<Any?>>()
 
-    if (isQuery) {
-        val rs = stmt.resultSet
-        val meta = rs.metaData
-        val columnCount = meta.columnCount
-        val columns = (1..columnCount).map { meta.getColumnLabel(it) }
-        val rows = mutableListOf<List<Any?>>()
-
-        while (rs.next()) {
-            val row = (1..columnCount).map { i ->
-                readColumnValue(rs, i, meta.getColumnType(i), meta.getColumnTypeName(i))
+                while (resultSet.next()) {
+                    val row = (1..columnCount).map { i ->
+                        readColumnValue(
+                            resultSet,
+                            i,
+                            meta.getColumnType(i),
+                            meta.getColumnTypeName(i)
+                        )
+                    }
+                    rows.add(row)
+                }
+                QueryResult(columns, rows)
             }
-            rows.add(row)
+        } else {
+            QueryResult(
+                columns = listOf("affected_rows"),
+                rows = listOf(listOf(stmt.updateCount))
+            )
         }
-        rs.close()
-        stmt.close()
-        return QueryResult(columns, rows)
-    } else {
-        val updateCount = stmt.updateCount
-        stmt.close()
-        return QueryResult(
-            columns = listOf("affected_rows"),
-            rows = listOf(listOf(updateCount))
-        )
     }
 }
 

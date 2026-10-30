@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+
+APP_JAR="~/dbe/target/dbe-1.0-SNAPSHOT.jar"
+
+if [ -f "$APP_JAR" ]; then
+  exec java -jar "$APP_JAR" "$@"
+else
+  echo "Error: JAR not found: $APP_JAR" >&2
+  exit 1
+fi

@@ -1,11 +1,4 @@
-///usr/bin/env jbang "$0" "$@" ; exit $?
-
-//DEPS tools.jackson.core:jackson-databind:3.0.3
-//DEPS tools.jackson.module:jackson-module-kotlin:3.0.3
-//DEPS io.modelcontextprotocol.sdk:mcp-bom:1.0.0@pom
-//DEPS io.modelcontextprotocol.sdk:mcp
-
-//SOURCES dbe-core.kt
+package dbe
 
 import io.modelcontextprotocol.json.jackson3.JacksonMcpJsonMapper
 import io.modelcontextprotocol.server.McpServer
@@ -20,15 +13,18 @@ import io.modelcontextprotocol.spec.McpSchema.Tool
 import tools.jackson.databind.SerializationFeature
 import tools.jackson.databind.json.JsonMapper
 import tools.jackson.module.kotlin.jacksonObjectMapper
+import java.io.InputStream
 import java.sql.SQLException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicBoolean
 
-val mapper = jacksonObjectMapper() as JsonMapper
-val prettyMapper = mapper.rebuild().enable(SerializationFeature.INDENT_OUTPUT).build()
-val mcpJsonMapper = JacksonMcpJsonMapper(mapper)
+private val mapper = jacksonObjectMapper() as JsonMapper
+private val prettyMapper: JsonMapper = mapper.rebuild().enable(SerializationFeature.INDENT_OUTPUT).build()
+private val mcpJsonMapper = JacksonMcpJsonMapper(mapper)
 
 // ── Tool: list_databases ────────────────────────────────────────────────────────
 
-val listDatabasesTool = SyncToolSpecification.builder()
+private val listDatabasesTool = SyncToolSpecification.builder()
     .tool(
         Tool.builder()
             .name("list_databases")
@@ -60,7 +56,7 @@ val listDatabasesTool = SyncToolSpecification.builder()
 
 // ── Tool: query ─────────────────────────────────────────────────────────────────
 
-val queryTool = SyncToolSpecification.builder()
+private val queryTool = SyncToolSpecification.builder()
     .tool(
         Tool.builder()
             .name("query")
@@ -120,20 +116,67 @@ val queryTool = SyncToolSpecification.builder()
     }
     .build()
 
-// ── Main ────────────────────────────────────────────────────────────────────────
+// ── Entry Point ─────────────────────────────────────────────────────────────────
 
-fun main() {
-    val transportProvider = StdioServerTransportProvider(mcpJsonMapper)
+private class EofAwareInputStream(
+    private val delegate: InputStream,
+    private val onEof: () -> Unit
+) : InputStream() {
+    private val notified = AtomicBoolean(false)
+
+    private fun eof(): Int {
+        if (notified.compareAndSet(false, true)) {
+            onEof()
+        }
+        return -1
+    }
+
+    override fun read(): Int {
+        val value = delegate.read()
+        return if (value < 0) eof() else value
+    }
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        val count = delegate.read(buffer, offset, length)
+        return if (count < 0) eof() else count
+    }
+
+    override fun close() {
+        delegate.close()
+    }
+}
+
+fun runMcpServer() {
+    val disconnected = CountDownLatch(1)
+    val input = EofAwareInputStream(System.`in`) {
+        disconnected.countDown()
+    }
+    val transportProvider = StdioServerTransportProvider(mcpJsonMapper, input, System.out)
 
     val server: McpSyncServer = McpServer.sync(transportProvider)
-        .serverInfo("dbe", "1.0.0")
-        .capabilities(ServerCapabilities.builder()
-            .tools(true)
-            .build())
+        .serverInfo("dbe", APP_VERSION)
+        .capabilities(
+            ServerCapabilities.builder()
+                .tools(true)
+                .build()
+        )
         .tools(listDatabasesTool, queryTool)
         .build()
 
-    Runtime.getRuntime().addShutdownHook(Thread { server.close() })
+    val config = inspectConfig()
+    System.err.println("dbe MCP configuration files:")
+    config.sources.forEach { source ->
+        System.err.println("  ${source.path}")
+    }
+    if (config.sources.isEmpty()) {
+        System.err.println("  (none found; searched ${config.searchedPaths.size} paths)")
+    }
 
-    Thread.currentThread().join()
+    Runtime.getRuntime().addShutdownHook(Thread {
+        server.close()
+        disconnected.countDown()
+    })
+
+    disconnected.await()
+    server.close()
 }
