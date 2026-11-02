@@ -107,7 +107,7 @@ fun findConfigFiles(): List<File> {
     return configSearchPaths().filter { it.exists() }
 }
 
-private fun configSearchPaths(): List<File> {
+internal fun configSearchPaths(): List<File> {
     return configSearchDirs()
         .map { File(it, "databases.json").canonicalFile }
         .distinct()
@@ -265,6 +265,12 @@ private data class LoadedDriver(
 
 private val loadedDrivers = ConcurrentHashMap<String, LoadedDriver>()
 
+/**
+ * Loads and registers the JDBC driver for [databaseName] from [DatabaseConfig.driverJar].
+ *
+ * Drivers are cached per `(driverJar, driverClass)` for the lifetime of the process,
+ * so replacing the JAR on disk requires a restart to take effect.
+ */
 @Synchronized
 fun loadDriver(
     databaseName: String,
@@ -302,6 +308,10 @@ fun loadDriver(
 
 // ── Database Connection & Query Execution ───────────────────────────────────────
 
+/**
+ * Opens a connection using [config]. The caller must ensure the driver for this
+ * database was registered first via [loadDriver].
+ */
 fun connect(config: DatabaseConfig): Connection {
     return DriverManager.getConnection(config.jdbcUrl, config.username, config.password)
 }

@@ -13,6 +13,7 @@ import io.modelcontextprotocol.spec.McpSchema.Tool
 import tools.jackson.databind.SerializationFeature
 import tools.jackson.databind.json.JsonMapper
 import tools.jackson.module.kotlin.jacksonObjectMapper
+import java.io.File
 import java.io.InputStream
 import java.sql.SQLException
 import java.util.concurrent.CountDownLatch
@@ -22,7 +23,38 @@ private val mapper = jacksonObjectMapper() as JsonMapper
 private val prettyMapper: JsonMapper = mapper.rebuild().enable(SerializationFeature.INDENT_OUTPUT).build()
 private val mcpJsonMapper = JacksonMcpJsonMapper(mapper)
 
+private fun errorResult(message: String): CallToolResult =
+    CallToolResult.builder().addTextContent(message).isError(true).build()
+
 // ── Tool: list_databases ────────────────────────────────────────────────────────
+
+internal fun handleListDatabases(searchPaths: List<File> = configSearchPaths()): CallToolResult {
+    return try {
+        val diagnostic = inspectConfig(searchPaths)
+        if (diagnostic.sources.isEmpty()) {
+            return errorResult(
+                "Error: No databases.json found.\nSearched in:\n" +
+                    diagnostic.searchedPaths.joinToString("\n") { "  - $it" }
+            )
+        }
+        val databases = diagnostic.databases
+        val names = databases.keys.sorted()
+        val details = names.associateWith { name ->
+            mapOf(
+                "dialect" to databases.getValue(name).resolvedDialect()
+            )
+        }
+        val text = prettyMapper.writeValueAsString(
+            mapOf(
+                "databases" to names,
+                "databaseDetails" to details
+            )
+        )
+        CallToolResult.builder().addTextContent(text).build()
+    } catch (e: Exception) {
+        errorResult("Error: ${e.message}")
+    }
+}
 
 private val listDatabasesTool = SyncToolSpecification.builder()
     .tool(
@@ -33,28 +65,56 @@ private val listDatabasesTool = SyncToolSpecification.builder()
             .build()
     )
     .callHandler { _: McpSyncServerExchange, _: McpSchema.CallToolRequest ->
-        try {
-            val databases = loadMergedConfig()
-            val names = databases.keys.sorted()
-            val details = names.associateWith { name ->
-                mapOf(
-                    "dialect" to databases.getValue(name).resolvedDialect()
-                )
-            }
-            val text = prettyMapper.writeValueAsString(
-                mapOf(
-                    "databases" to names,
-                    "databaseDetails" to details
-                )
-            )
-            CallToolResult.builder().addTextContent(text).build()
-        } catch (e: Exception) {
-            CallToolResult.builder().addTextContent("Error: ${e.message}").isError(true).build()
-        }
+        handleListDatabases()
     }
     .build()
 
 // ── Tool: query ─────────────────────────────────────────────────────────────────
+
+internal fun handleQuery(
+    database: String?,
+    sql: String?,
+    searchPaths: List<File> = configSearchPaths()
+): CallToolResult {
+    val databaseName = database
+        ?: return errorResult("Error: 'database' argument is required")
+    val statement = sql
+        ?: return errorResult("Error: 'sql' argument is required")
+
+    return try {
+        val diagnostic = inspectConfig(searchPaths)
+        if (diagnostic.sources.isEmpty()) {
+            return errorResult(
+                "Error: No databases.json found.\nSearched in:\n" +
+                    diagnostic.searchedPaths.joinToString("\n") { "  - $it" }
+            )
+        }
+        val databases = diagnostic.databases
+        val dbConfig = databases[databaseName]
+            ?: return errorResult(
+                "Error: Database '$databaseName' not found. Available: ${databases.keys.sorted().joinToString(", ")}"
+            )
+
+        loadDriver(databaseName, dbConfig, diagnostic.sourceOf[databaseName])
+
+        val result = connect(dbConfig).use { connection ->
+            executeQuery(connection, statement)
+        }
+
+        val structured = mapOf(
+            "columns" to result.columns,
+            "rows" to result.rows
+        )
+        val text = prettyMapper.writeValueAsString(structured)
+        CallToolResult.builder().addTextContent(text).build()
+
+    } catch (e: SQLException) {
+        val msg = "SQL Error: ${e.message}\nSQL State: ${e.sqlState}\nError Code: ${e.errorCode}"
+        errorResult(msg)
+    } catch (e: Exception) {
+        errorResult("Error: ${e.message}")
+    }
+}
 
 private val queryTool = SyncToolSpecification.builder()
     .tool(
@@ -80,48 +140,8 @@ private val queryTool = SyncToolSpecification.builder()
             .build()
     )
     .callHandler { _: McpSyncServerExchange, request: McpSchema.CallToolRequest ->
-        try {
-            val database = request.arguments()["database"] as? String
-                ?: return@callHandler CallToolResult.builder()
-                    .addTextContent("Error: 'database' argument is required").isError(true).build()
-            val sql = request.arguments()["sql"] as? String
-                ?: return@callHandler CallToolResult.builder()
-                    .addTextContent("Error: 'sql' argument is required").isError(true).build()
-
-            val diagnostic = inspectConfig()
-            if (diagnostic.sources.isEmpty()) {
-                return@callHandler CallToolResult.builder()
-                    .addTextContent(
-                        "Error: No databases.json found.\nSearched in:\n" +
-                            diagnostic.searchedPaths.joinToString("\n") { "  - $it" }
-                    )
-                    .isError(true).build()
-            }
-            val databases = diagnostic.databases
-            val dbConfig = databases[database]
-                ?: return@callHandler CallToolResult.builder()
-                    .addTextContent("Error: Database '$database' not found. Available: ${databases.keys.sorted().joinToString(", ")}")
-                    .isError(true).build()
-
-            loadDriver(database, dbConfig, diagnostic.sourceOf[database])
-
-            val result = connect(dbConfig).use { connection ->
-                executeQuery(connection, sql)
-            }
-
-            val structured = mapOf(
-                "columns" to result.columns,
-                "rows" to result.rows
-            )
-            val text = prettyMapper.writeValueAsString(structured)
-            CallToolResult.builder().addTextContent(text).build()
-
-        } catch (e: SQLException) {
-            val msg = "SQL Error: ${e.message}\nSQL State: ${e.sqlState}\nError Code: ${e.errorCode}"
-            CallToolResult.builder().addTextContent(msg).isError(true).build()
-        } catch (e: Exception) {
-            CallToolResult.builder().addTextContent("Error: ${e.message}").isError(true).build()
-        }
+        val args = request.arguments() ?: emptyMap()
+        handleQuery(args["database"] as? String, args["sql"] as? String)
     }
     .build()
 
@@ -146,6 +166,9 @@ internal class EofAwareInputStream(
     }
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        if (offset < 0 || length < 0 || length > buffer.size - offset) {
+            throw IndexOutOfBoundsException()
+        }
         val count = delegate.read(buffer, offset, length)
         return if (count < 0) eof() else count
     }

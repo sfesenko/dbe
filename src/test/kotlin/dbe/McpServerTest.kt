@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 import java.io.ByteArrayInputStream
 import java.io.InputStream
 
@@ -106,6 +107,33 @@ class McpServerTest {
 
         assertEquals(3, count)
         assertEquals(0, eofCount)
+    }
+
+    /** A delegate that deliberately skips the InputStream bounds contract. */
+    private class NoValidationInputStream : InputStream() {
+        override fun read(): Int = -1
+        override fun read(buffer: ByteArray, offset: Int, length: Int): Int = -1
+    }
+
+    @Test
+    fun `EofAwareInputStream rejects negative offset`() {
+        val input = EofAwareInputStream(NoValidationInputStream()) {}
+
+        assertThrows<IndexOutOfBoundsException> { input.read(ByteArray(4), -1, 2) }
+    }
+
+    @Test
+    fun `EofAwareInputStream rejects negative length`() {
+        val input = EofAwareInputStream(NoValidationInputStream()) {}
+
+        assertThrows<IndexOutOfBoundsException> { input.read(ByteArray(4), 0, -1) }
+    }
+
+    @Test
+    fun `EofAwareInputStream rejects length beyond buffer`() {
+        val input = EofAwareInputStream(NoValidationInputStream()) {}
+
+        assertThrows<IndexOutOfBoundsException> { input.read(ByteArray(4), 2, 3) }
     }
 
     @Test
