@@ -14,10 +14,15 @@ while [ -L "$SOURCE" ]; do
 done
 SCRIPT_DIR=$(cd "$(dirname "$SOURCE")" && pwd)
 
-# An explicit DBE_JAR always wins; otherwise look for the JAR next to the
-# script (source checkout target/ or an installed layout).
-JAR="${DBE_JAR:-}"
-if [ -z "$JAR" ] || [ ! -f "$JAR" ]; then
+# An explicit DBE_JAR wins; otherwise look for the JAR next to the script
+# (source checkout target/ or an installed layout).
+if [ -n "${DBE_JAR:-}" ]; then
+  if [ ! -f "$DBE_JAR" ]; then
+    echo "Error: DBE_JAR does not point to a file: $DBE_JAR" >&2
+    exit 1
+  fi
+  JAR="$DBE_JAR"
+else
   JAR=""
   for cand in \
     "$SCRIPT_DIR/target/dbe-1.0-SNAPSHOT.jar" \

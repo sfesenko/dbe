@@ -19,14 +19,13 @@ fun formatJson(result: QueryResult): String {
 }
 
 fun formatCsv(result: QueryResult): String {
-    val sb = StringBuilder()
-    sb.appendLine(result.columns.joinToString(",") { escapeCsvField(it) })
+    val lines = mutableListOf<String>()
+    lines += result.columns.joinToString(",") { escapeCsvField(it) }
     for (row in result.rows) {
-        sb.appendLine(row.joinToString(",") { escapeCsvField(it?.toString() ?: "") })
+        lines += row.joinToString(",") { escapeCsvField(it?.toString() ?: "") }
     }
-    // Remove only the final line terminator; trimEnd() would also strip
-    // legitimate trailing whitespace from the last field.
-    return sb.toString().removeSuffix("\n").removeSuffix("\r")
+    // Join explicitly so trailing whitespace inside the last field survives.
+    return lines.joinToString("\n")
 }
 
 fun escapeCsvField(field: String): String {

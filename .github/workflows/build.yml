@@ -27,9 +27,15 @@ jobs:
       - name: Build and test
         run: ./mvnw -B -ntp verify
 
+      - name: Verify launcher through a PATH symlink
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          ln -s "$PWD/dbe" "$RUNNER_TEMP/bin/dbe"
+          PATH="$RUNNER_TEMP/bin:$PATH" dbe --help >/dev/null 2>&1
+
       - name: Upload application JAR
         uses: actions/upload-artifact@v4
         with:
           name: dbe-jar
           path: target/dbe-1.0-SNAPSHOT.jar
-          if-no-files-found: warn
+          if-no-files-found: error

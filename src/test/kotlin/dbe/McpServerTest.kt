@@ -137,6 +137,13 @@ class McpServerTest {
     }
 
     @Test
+    fun `EofAwareInputStream accepts an empty read at the end of the buffer`() {
+        val input = EofAwareInputStream(ByteArrayInputStream(ByteArray(4))) {}
+
+        assertEquals(0, input.read(ByteArray(4), 4, 0))
+    }
+
+    @Test
     fun `EofAwareInputStream triggers onEof after consuming all data then reading`() {
         val data = byteArrayOf(1, 2)
         var eofCount = 0

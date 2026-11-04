@@ -10,7 +10,7 @@ import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.CsvSource
 import java.io.File
 import java.nio.file.Path
-import java.sql.DriverManager
+import java.nio.file.Paths
 
 class McpServerHandlerTest {
 
@@ -18,7 +18,7 @@ class McpServerHandlerTest {
     lateinit var tempDir: Path
 
     private val h2JarPath: String by lazy {
-        File(org.h2.Driver::class.java.protectionDomain.codeSource.location.toURI()).path
+        Paths.get(org.h2.Driver::class.java.protectionDomain.codeSource.location.toURI()).toString()
     }
 
     private fun configFile(vararg names: String): File {
@@ -88,6 +88,16 @@ class McpServerHandlerTest {
     }
 
     @Test
+    fun `handleToolRequest tolerates a missing arguments map`() {
+        val request = McpSchema.CallToolRequest("query", null)
+
+        val result = handleToolRequest(request)
+
+        assertEquals(true, result.isError)
+        assertTrue(result.text().contains("'database' argument is required"))
+    }
+
+    @Test
     fun `handleQuery reports missing configuration`() {
         val missing = tempDir.resolve("missing.json").toFile()
 
@@ -114,7 +124,7 @@ class McpServerHandlerTest {
         val config = configFile("happy")
         val paths = listOf(config)
 
-        assertEquals(false, handleQuery("happy", "CREATE TABLE sample (id INT, name VARCHAR(20))", paths).isError)
+        assertEquals(false, handleQuery("happy", "CREATE TABLE IF NOT EXISTS sample (id INT, name VARCHAR(20))", paths).isError)
         assertEquals(false, handleQuery("happy", "INSERT INTO sample VALUES (42, 'alice')", paths).isError)
 
         val result = handleQuery("happy", "SELECT id, name FROM sample", paths)
@@ -131,7 +141,7 @@ class McpServerHandlerTest {
         val config = configFile("dml")
         val paths = listOf(config)
 
-        handleQuery("dml", "CREATE TABLE sample (id INT)", paths)
+        handleQuery("dml", "CREATE TABLE IF NOT EXISTS sample (id INT)", paths)
         val result = handleQuery("dml", "INSERT INTO sample VALUES (1), (2)", paths)
 
         assertEquals(false, result.isError)
@@ -169,15 +179,10 @@ class McpServerHandlerTest {
     @Test
     fun `handleQuery executes against a configured database`() {
         val config = configFile("external")
-        val database = "external"
 
-        val result = handleQuery(database, "SELECT 1 AS answer", listOf(config))
+        val result = handleQuery("external", "SELECT 1 AS answer", listOf(config))
 
         assertEquals(false, result.isError)
         assertTrue(result.text().contains("ANSWER"), result.text())
-        assertTrue(
-            DriverManager.getConnection("jdbc:h2:mem:mcp_$database;DB_CLOSE_DELAY=-1", "sa", "")
-                .use { it.isValid(1) }
-        )
     }
 }

@@ -120,6 +120,13 @@ class CliFormattersTest {
     }
 
     @Test
+    fun `formatCsv preserves trailing carriage return in last field`() {
+        val r = result(listOf("name"), listOf("hello\r"))
+        val csv = formatCsv(r)
+        assertEquals("name\nhello\r", csv)
+    }
+
+    @Test
     fun `formatCsv represents null as empty string`() {
         val r = result(listOf("id", "name"), listOf(1, null))
         val csv = formatCsv(r)

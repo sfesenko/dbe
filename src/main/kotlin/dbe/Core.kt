@@ -224,23 +224,6 @@ fun inspectConfig(searchPaths: List<File>): ConfigDiagnostic {
     )
 }
 
-/**
- * Loads and merges databases from all found databases.json files.
- * Files are loaded in order: ~/work/notes, ~, current dir.
- * Later files override earlier ones (so current dir wins).
- * Warnings are printed to stderr for collisions.
- */
-fun loadMergedConfig(): Map<String, DatabaseConfig> {
-    val diagnostic = inspectConfig()
-    if (diagnostic.sources.isEmpty()) {
-        error(
-            "No databases.json found.\nSearched in:\n" +
-                diagnostic.searchedPaths.joinToString("\n") { "  - $it" }
-        )
-    }
-    return diagnostic.databases
-}
-
 // ── JDBC Driver Loading ─────────────────────────────────────────────────────────
 
 /**

@@ -28,9 +28,9 @@ private fun errorResult(message: String): CallToolResult =
 
 // ── Tool: list_databases ────────────────────────────────────────────────────────
 
-internal fun handleListDatabases(searchPaths: List<File> = configSearchPaths()): CallToolResult {
+internal fun handleListDatabases(searchPaths: List<File>? = null): CallToolResult {
     return try {
-        val diagnostic = inspectConfig(searchPaths)
+        val diagnostic = inspectConfig(searchPaths ?: configSearchPaths())
         if (diagnostic.sources.isEmpty()) {
             return errorResult(
                 "Error: No databases.json found.\nSearched in:\n" +
@@ -74,7 +74,7 @@ private val listDatabasesTool = SyncToolSpecification.builder()
 internal fun handleQuery(
     database: String?,
     sql: String?,
-    searchPaths: List<File> = configSearchPaths()
+    searchPaths: List<File>? = null
 ): CallToolResult {
     val databaseName = database
         ?: return errorResult("Error: 'database' argument is required")
@@ -82,7 +82,7 @@ internal fun handleQuery(
         ?: return errorResult("Error: 'sql' argument is required")
 
     return try {
-        val diagnostic = inspectConfig(searchPaths)
+        val diagnostic = inspectConfig(searchPaths ?: configSearchPaths())
         if (diagnostic.sources.isEmpty()) {
             return errorResult(
                 "Error: No databases.json found.\nSearched in:\n" +
@@ -116,6 +116,11 @@ internal fun handleQuery(
     }
 }
 
+internal fun handleToolRequest(request: McpSchema.CallToolRequest): CallToolResult {
+    val args = request.arguments() ?: emptyMap()
+    return handleQuery(args["database"] as? String, args["sql"] as? String)
+}
+
 private val queryTool = SyncToolSpecification.builder()
     .tool(
         Tool.builder()
@@ -140,8 +145,7 @@ private val queryTool = SyncToolSpecification.builder()
             .build()
     )
     .callHandler { _: McpSyncServerExchange, request: McpSchema.CallToolRequest ->
-        val args = request.arguments() ?: emptyMap()
-        handleQuery(args["database"] as? String, args["sql"] as? String)
+        handleToolRequest(request)
     }
     .build()
 
