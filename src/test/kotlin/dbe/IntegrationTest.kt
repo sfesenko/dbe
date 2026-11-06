@@ -1,11 +1,14 @@
 package dbe
 
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeAll
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.nio.file.Path
 import java.sql.DriverManager
 
 class IntegrationTest {
@@ -70,6 +73,61 @@ class IntegrationTest {
         assertTrue(ex.message!!.contains("driverJar not found"))
         assertTrue(ex.message!!.contains("missing-db"))
         assertTrue(ex.message!!.contains("test-config.json"))
+    }
+
+    @Test
+    fun `loadDriver reports unresolved driver reference`() {
+        val badConfig = DatabaseConfig(
+            jdbcUrl = JDBC_URL,
+            username = USER,
+            password = PASSWORD,
+            driverError = "driver 'missing' is not defined\n  available drivers: postgresql"
+        )
+        val ex = org.junit.jupiter.api.assertThrows<IllegalStateException> {
+            loadDriver("unresolved-db", badConfig, "test-config.json")
+        }
+        assertTrue(ex.message!!.contains("unresolved-db"))
+        assertTrue(ex.message!!.contains("test-config.json"))
+        assertTrue(ex.message!!.contains("driver 'missing' is not defined"))
+        assertTrue(ex.message!!.contains("available drivers: postgresql"))
+    }
+
+    @Test
+    fun `loadDriver reports driver definition file for referenced driver`(@TempDir dir: Path) {
+        val driversFile = dir.resolve("drivers.json").toFile().canonicalFile
+        driversFile.writeText(
+            """
+            {
+              "drivers": {
+                "broken": { "class": "org.h2.Driver", "jar": "/nonexistent/referenced-driver.jar" }
+              }
+            }
+            """.trimIndent()
+        )
+        val databasesFile = dir.resolve("databases.json").toFile().canonicalFile
+        databasesFile.writeText(
+            """
+            {
+              "databases": {
+                "refdb": {
+                  "jdbcUrl": "jdbc:h2:mem:refdb",
+                  "username": "sa",
+                  "password": "",
+                  "driver": "broken"
+                }
+              }
+            }
+            """.trimIndent()
+        )
+
+        val diagnostic = inspectConfig(listOf(driversFile, databasesFile))
+        val config = diagnostic.databases.getValue("refdb")
+        val ex = org.junit.jupiter.api.assertThrows<IllegalStateException> {
+            loadDriver("refdb", config, diagnostic.sourceOf["refdb"])
+        }
+
+        assertTrue(ex.message!!.contains(driversFile.path), ex.message)
+        assertFalse(ex.message!!.contains(databasesFile.path), ex.message)
     }
 
     // ── connect ──────────────────────────────────────────────────────────────────

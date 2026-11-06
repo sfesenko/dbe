@@ -20,13 +20,32 @@ data class DatabaseConfig(
     val jdbcUrl: String,
     val username: String,
     val password: String,
-    val driverClass: String,
-    val driverJar: String,
+    val driverClass: String? = null,
+    val driverJar: String? = null,
+    val dialect: String? = null,
+    val driverName: String? = null,
+    val driverError: String? = null,
+    val driverSource: String? = null
+)
+
+data class DriverConfig(
+    val `class`: String,
+    val jar: String
+)
+
+data class DatabaseEntry(
+    val jdbcUrl: String,
+    val username: String,
+    val password: String,
+    val driver: String? = null,
+    val driverClass: String? = null,
+    val driverJar: String? = null,
     val dialect: String? = null
 )
 
 data class DatabasesFile(
-    val databases: Map<String, DatabaseConfig>
+    val drivers: Map<String, DriverConfig> = emptyMap(),
+    val databases: Map<String, DatabaseEntry> = emptyMap()
 )
 
 data class QueryResult(
@@ -37,6 +56,7 @@ data class QueryResult(
 data class ConfigSourceDiagnostic(
     val path: String,
     val databaseNames: List<String>,
+    val driverNames: List<String> = emptyList(),
     val parseError: String? = null
 )
 
@@ -44,7 +64,10 @@ data class ConfigDiagnostic(
     val searchedPaths: List<String>,
     val sources: List<ConfigSourceDiagnostic>,
     val databases: Map<String, DatabaseConfig>,
-    val sourceOf: Map<String, String>
+    val sourceOf: Map<String, String>,
+    val drivers: Map<String, DriverConfig> = emptyMap(),
+    val driverSourceOf: Map<String, String> = emptyMap(),
+    val driverUsers: Map<String, List<String>> = emptyMap()
 )
 
 fun DatabaseConfig.resolvedDialect(): String? {
@@ -52,7 +75,7 @@ fun DatabaseConfig.resolvedDialect(): String? {
         ?.trim()
         ?.takeIf { it.isNotEmpty() }
         ?.lowercase()
-    return configuredDialect ?: inferDialect(jdbcUrl, driverClass)
+    return configuredDialect ?: inferDialect(jdbcUrl, driverClass ?: "")
 }
 
 internal fun inferDialect(jdbcUrl: String, driverClass: String): String? {
@@ -123,7 +146,7 @@ fun loadConfig(configFile: File): DatabasesFile {
         parseConfig(configFile)
     } catch (e: Exception) {
         System.err.println("Warning: Failed to parse '${configFile.absolutePath}': ${e.message}")
-        DatabasesFile(emptyMap())
+        DatabasesFile()
     }
 }
 
@@ -161,8 +184,97 @@ internal fun displayPath(path: String): String {
 internal fun normalizeConfig(config: DatabaseConfig): DatabaseConfig {
     return config.copy(
         jdbcUrl = expandJdbcUrl(config.jdbcUrl),
-        driverJar = expandTilde(config.driverJar)
+        driverJar = config.driverJar?.let(::expandTilde)
     )
+}
+
+private data class PendingDatabase(
+    val entry: DatabaseEntry,
+    val source: String
+)
+
+private data class DriverOverride(
+    val name: String,
+    val previousSource: String,
+    val newSource: String
+)
+
+internal data class MissingDriverJar(
+    val jarPath: String,
+    val source: String
+)
+
+private fun missingDriverMessage(name: String, drivers: Map<String, DriverConfig>): String {
+    val available = drivers.keys.sorted()
+    return if (available.isEmpty()) {
+        "driver '$name' is not defined\n  no drivers are defined"
+    } else {
+        "driver '$name' is not defined\n  available drivers: ${available.joinToString(", ")}"
+    }
+}
+
+internal fun resolveDatabaseConfig(
+    entry: DatabaseEntry,
+    drivers: Map<String, DriverConfig>
+): DatabaseConfig {
+    val base = DatabaseConfig(
+        jdbcUrl = entry.jdbcUrl,
+        username = entry.username,
+        password = entry.password,
+        dialect = entry.dialect,
+        driverName = entry.driver
+    )
+    val hasInlineDriver = entry.driverClass != null || entry.driverJar != null
+
+    val resolved = when {
+        entry.driver != null && hasInlineDriver -> base.copy(
+            driverError = "both 'driver' and inline 'driverClass'/'driverJar' are set"
+        )
+
+        entry.driver != null -> {
+            val driver = drivers[entry.driver]
+            if (driver == null) {
+                base.copy(driverError = missingDriverMessage(entry.driver, drivers))
+            } else {
+                base.copy(driverClass = driver.`class`, driverJar = driver.jar)
+            }
+        }
+
+        entry.driverClass != null && entry.driverJar != null -> base.copy(
+            driverClass = entry.driverClass,
+            driverJar = entry.driverJar
+        )
+
+        hasInlineDriver -> base.copy(
+            driverError = "both 'driverClass' and 'driverJar' are required when not using 'driver'"
+        )
+
+        else -> base.copy(
+            driverError = "missing 'driver' reference or inline 'driverClass'/'driverJar'"
+        )
+    }
+
+    return normalizeConfig(resolved)
+}
+
+internal fun collectMissingDriverJars(
+    databases: Map<String, DatabaseConfig>,
+    sourceOf: Map<String, String>,
+    driverSourceOf: Map<String, String>
+): Map<MissingDriverJar, List<String>> {
+    val missing = linkedMapOf<MissingDriverJar, MutableList<String>>()
+    for ((name, config) in databases) {
+        val jar = config.driverJar ?: continue
+        if (config.driverError == null && !File(jar).exists()) {
+            val source = config.driverName
+                ?.let { driverSourceOf[it] }
+                ?: sourceOf[name]
+                ?: "databases.json"
+            val key = MissingDriverJar(File(jar).absolutePath, source)
+            missing.getOrPut(key) { mutableListOf() }.add(name)
+        }
+    }
+    return missing.mapValues { (_, names) -> names.toList() }
 }
 
 fun inspectConfig(): ConfigDiagnostic =
@@ -171,40 +283,40 @@ fun inspectConfig(): ConfigDiagnostic =
 fun inspectConfig(searchPaths: List<File>): ConfigDiagnostic {
     val searchedPaths = searchPaths.map { it.canonicalFile }.distinct()
     val sources = mutableListOf<ConfigSourceDiagnostic>()
-    val merged = linkedMapOf<String, DatabaseConfig>()
+    val mergedDrivers = linkedMapOf<String, DriverConfig>()
+    val driverSourceOf = linkedMapOf<String, String>()
+    val driverOverrides = mutableListOf<DriverOverride>()
+    val pendingDatabases = linkedMapOf<String, PendingDatabase>()
     val sourceOf = linkedMapOf<String, String>()
 
     for (file in searchedPaths.filter { it.exists() }) {
         try {
             val config = parseConfig(file)
-            val names = config.databases.keys.sorted()
-            sources += ConfigSourceDiagnostic(file.path, names)
+            sources += ConfigSourceDiagnostic(
+                path = file.path,
+                databaseNames = config.databases.keys.sorted(),
+                driverNames = config.drivers.keys.sorted()
+            )
 
-            // name -> missing driverJar path
-            val missingDrivers = linkedMapOf<String, MutableList<String>>()
-
-            for ((name, rawConfig) in config.databases) {
-                val normalized = normalizeConfig(rawConfig)
-                val jarFile = File(normalized.driverJar)
-                if (!jarFile.exists()) {
-                    missingDrivers
-                        .getOrPut(jarFile.absolutePath) { mutableListOf() }
-                        .add(name)
+            for ((name, rawDriver) in config.drivers) {
+                val driver = rawDriver.copy(jar = expandTilde(rawDriver.jar))
+                val previous = mergedDrivers[name]
+                val previousSource = driverSourceOf[name]
+                if (previous != null && previousSource != null && previous != driver) {
+                    driverOverrides += DriverOverride(name, previousSource, file.path)
                 }
+                mergedDrivers[name] = driver
+                driverSourceOf[name] = file.path
+            }
+
+            for ((name, entry) in config.databases) {
                 if (sourceOf.containsKey(name)) {
                     System.err.println(
                         "Warning: '$name' overridden by ${displayPath(file.path)} (was ${displayPath(sourceOf.getValue(name))})"
                     )
                 }
-                merged[name] = normalized
+                pendingDatabases[name] = PendingDatabase(entry, file.path)
                 sourceOf[name] = file.path
-            }
-
-            for ((jarPath, dbNames) in missingDrivers) {
-                System.err.println(
-                    "Warning: ${displayPath(file.path)} — missing driverJar for ${dbNames.sorted().joinToString(", ")}"
-                )
-                System.err.println("  ${displayPath(jarPath)}")
             }
         } catch (e: Exception) {
             System.err.println("Warning: Failed to parse '${displayPath(file.absolutePath)}': ${e.message}")
@@ -216,11 +328,55 @@ fun inspectConfig(searchPaths: List<File>): ConfigDiagnostic {
         }
     }
 
+    val merged = linkedMapOf<String, DatabaseConfig>()
+    for ((name, pending) in pendingDatabases) {
+        val config = resolveDatabaseConfig(pending.entry, mergedDrivers)
+        val resolved = if (config.driverError == null && config.driverName != null) {
+            config.copy(driverSource = driverSourceOf[config.driverName])
+        } else {
+            config
+        }
+        if (resolved.driverError != null) {
+            System.err.println(
+                "Warning: ${displayPath(pending.source)} — database '$name': ${resolved.driverError}"
+            )
+        }
+        merged[name] = resolved
+    }
+
+    val driverUsers = mergedDrivers.keys.associateWith { driverName ->
+        merged
+            .filterValues { it.driverName == driverName && it.driverError == null }
+            .keys
+            .sorted()
+    }
+
+    for (override in driverOverrides) {
+        val users = driverUsers[override.name].orEmpty()
+        val usedBy = if (users.isEmpty()) "" else "; used by: ${users.joinToString(", ")}"
+        System.err.println(
+            "Warning: driver '${override.name}' overridden by ${displayPath(override.newSource)} " +
+                "(was ${displayPath(override.previousSource)})$usedBy"
+        )
+    }
+
+    val missingDriverJars = collectMissingDriverJars(merged, sourceOf, driverSourceOf)
+
+    for ((missing, dbNames) in missingDriverJars) {
+        System.err.println(
+            "Warning: ${displayPath(missing.source)} — missing driverJar for ${dbNames.sorted().joinToString(", ")}"
+        )
+        System.err.println("  ${displayPath(missing.jarPath)}")
+    }
+
     return ConfigDiagnostic(
         searchedPaths = searchedPaths.map(File::getPath),
         sources = sources,
         databases = merged,
-        sourceOf = sourceOf
+        sourceOf = sourceOf,
+        drivers = mergedDrivers,
+        driverSourceOf = driverSourceOf,
+        driverUsers = driverUsers
     )
 }
 
@@ -260,16 +416,29 @@ fun loadDriver(
     config: DatabaseConfig,
     configFile: String? = null
 ) {
-    val jarFile = File(config.driverJar)
+    config.driverError?.let { message ->
+        val source = config.driverSource ?: configFile ?: "databases.json"
+        error(
+            "Cannot load driver for '$databaseName'\n" +
+                "  file: ${displayPath(source)}\n" +
+                "  $message"
+        )
+    }
+
+    val driverClass = config.driverClass
+        ?: error("driverClass is missing for '$databaseName'")
+    val driverJar = config.driverJar
+        ?: error("driverJar is missing for '$databaseName'")
+    val jarFile = File(driverJar)
     if (!jarFile.exists()) {
-        val source = configFile ?: "databases.json"
+        val source = config.driverSource ?: configFile ?: "databases.json"
         error(
             "driverJar not found for '$databaseName'\n" +
                 "  file: ${displayPath(source)}\n" +
                 "  jar:  ${displayPath(jarFile.absolutePath)}"
         )
     }
-    val key = "${jarFile.canonicalPath}|${config.driverClass}"
+    val key = "${jarFile.canonicalPath}|$driverClass"
     if (loadedDrivers.containsKey(key)) return
 
     val classLoader = URLClassLoader(
@@ -277,7 +446,7 @@ fun loadDriver(
         ClassLoader.getSystemClassLoader()
     )
     try {
-        val driverInstance = Class.forName(config.driverClass, true, classLoader)
+        val driverInstance = Class.forName(driverClass, true, classLoader)
             .getDeclaredConstructor()
             .newInstance() as Driver
         val shim = DriverShim(driverInstance)

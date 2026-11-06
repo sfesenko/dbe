@@ -11,6 +11,9 @@ import java.nio.file.Path
 
 class CoreTest {
 
+    private fun writeJson(dir: Path, name: String, json: String): File =
+        dir.resolve(name).toFile().canonicalFile.apply { writeText(json.trimIndent()) }
+
     // ── inferDialect / resolvedDialect ────────────────────────────────────────────
 
     @Test
@@ -303,6 +306,261 @@ class CoreTest {
         assertEquals(setOf("db1", "db2"), config.databases.keys)
     }
 
+    // ── drivers section ──────────────────────────────────────────────────────────
+
+    @Test
+    fun `parseConfig reads drivers section`(@TempDir dir: Path) {
+        val file = writeJson(
+            dir, "databases.json",
+            """
+            {
+              "drivers": {
+                "postgresql": { "class": "org.postgresql.Driver", "jar": "~/pg.jar" }
+              },
+              "databases": {
+                "db": {
+                  "jdbcUrl": "jdbc:postgresql://localhost/db",
+                  "username": "u",
+                  "password": "p",
+                  "driver": "postgresql"
+                }
+              }
+            }
+            """
+        )
+
+        val config = parseConfig(file)
+
+        assertEquals(setOf("postgresql"), config.drivers.keys)
+        assertEquals("org.postgresql.Driver", config.drivers.getValue("postgresql").`class`)
+        assertEquals("~/pg.jar", config.drivers.getValue("postgresql").jar)
+        assertEquals("postgresql", config.databases.getValue("db").driver)
+    }
+
+    @Test
+    fun `inspectConfig resolves driver reference`(@TempDir dir: Path) {
+        val file = writeJson(
+            dir, "databases.json",
+            """
+            {
+              "drivers": {
+                "postgresql": { "class": "org.postgresql.Driver", "jar": "~/pg.jar" }
+              },
+              "databases": {
+                "db": {
+                  "jdbcUrl": "jdbc:postgresql://localhost/db",
+                  "username": "u",
+                  "password": "p",
+                  "driver": "postgresql"
+                }
+              }
+            }
+            """
+        )
+
+        val result = inspectConfig(listOf(file))
+        val db = result.databases.getValue("db")
+        val home = System.getProperty("user.home")
+
+        assertEquals("org.postgresql.Driver", db.driverClass)
+        assertEquals("$home/pg.jar", db.driverJar)
+        assertEquals("postgresql", db.driverName)
+        assertNull(db.driverError)
+        assertEquals(file.path, result.driverSourceOf["postgresql"])
+        assertEquals(listOf("db"), result.driverUsers["postgresql"])
+    }
+
+    @Test
+    fun `inspectConfig resolves driver defined in another file`(@TempDir dir: Path) {
+        val driversFile = writeJson(
+            dir, "drivers-layer.json",
+            """
+            {
+              "drivers": {
+                "postgresql": { "class": "org.postgresql.Driver", "jar": "/drivers/pg.jar" }
+              }
+            }
+            """
+        )
+        val databasesFile = writeJson(
+            dir, "databases-layer.json",
+            """
+            {
+              "databases": {
+                "db": {
+                  "jdbcUrl": "jdbc:postgresql://localhost/db",
+                  "username": "u",
+                  "password": "p",
+                  "driver": "postgresql"
+                }
+              }
+            }
+            """
+        )
+
+        val result = inspectConfig(listOf(driversFile, databasesFile))
+
+        assertEquals("/drivers/pg.jar", result.databases.getValue("db").driverJar)
+        assertEquals(driversFile.path, result.driverSourceOf["postgresql"])
+        assertEquals(databasesFile.path, result.sourceOf["db"])
+        assertEquals(listOf("db"), result.driverUsers["postgresql"])
+    }
+
+    @Test
+    fun `inspectConfig resolves driver defined in a later file`(@TempDir dir: Path) {
+        val databasesFile = writeJson(
+            dir, "databases-layer.json",
+            """
+            {
+              "databases": {
+                "db": {
+                  "jdbcUrl": "jdbc:postgresql://localhost/db",
+                  "username": "u",
+                  "password": "p",
+                  "driver": "postgresql"
+                }
+              }
+            }
+            """
+        )
+        val driversFile = writeJson(
+            dir, "drivers-layer.json",
+            """
+            {
+              "drivers": {
+                "postgresql": { "class": "org.postgresql.Driver", "jar": "/drivers/pg.jar" }
+              }
+            }
+            """
+        )
+
+        val result = inspectConfig(listOf(databasesFile, driversFile))
+
+        assertEquals("/drivers/pg.jar", result.databases.getValue("db").driverJar)
+        assertEquals(driversFile.path, result.driverSourceOf["postgresql"])
+        assertEquals(listOf("db"), result.driverUsers["postgresql"])
+    }
+
+    @Test
+    fun `inspectConfig lets later file override a referenced driver`(@TempDir dir: Path) {
+        val file1 = writeJson(
+            dir, "a.json",
+            """
+            {
+              "drivers": {
+                "postgresql": { "class": "org.postgresql.Driver", "jar": "/a/pg.jar" }
+              },
+              "databases": {
+                "db": {
+                  "jdbcUrl": "jdbc:postgresql://localhost/db",
+                  "username": "u",
+                  "password": "p",
+                  "driver": "postgresql"
+                }
+              }
+            }
+            """
+        )
+        val file2 = writeJson(
+            dir, "b.json",
+            """
+            {
+              "drivers": {
+                "postgresql": { "class": "org.postgresql.Driver", "jar": "/b/pg.jar" }
+              }
+            }
+            """
+        )
+
+        val result = inspectConfig(listOf(file1, file2))
+
+        assertEquals("/b/pg.jar", result.databases.getValue("db").driverJar)
+        assertEquals(file2.path, result.driverSourceOf["postgresql"])
+        assertEquals(listOf("db"), result.driverUsers["postgresql"])
+    }
+
+    @Test
+    fun `inspectConfig reports unknown driver reference`(@TempDir dir: Path) {
+        val file = writeJson(
+            dir, "databases.json",
+            """
+            {
+              "drivers": {
+                "postgresql": { "class": "org.postgresql.Driver", "jar": "/pg.jar" }
+              },
+              "databases": {
+                "db": {
+                  "jdbcUrl": "jdbc:h2:mem:test",
+                  "username": "sa",
+                  "password": "",
+                  "driver": "missing-driver"
+                }
+              }
+            }
+            """
+        )
+
+        val result = inspectConfig(listOf(file))
+        val db = result.databases.getValue("db")
+
+        assertTrue(db.driverError!!.contains("missing-driver"), db.driverError)
+        assertTrue(db.driverError!!.contains("postgresql"), db.driverError)
+        assertNull(db.driverClass)
+        assertNull(db.driverJar)
+    }
+
+    @Test
+    fun `inspectConfig rejects driver reference combined with inline driver`(@TempDir dir: Path) {
+        val file = writeJson(
+            dir, "databases.json",
+            """
+            {
+              "drivers": {
+                "postgresql": { "class": "org.postgresql.Driver", "jar": "/pg.jar" }
+              },
+              "databases": {
+                "db": {
+                  "jdbcUrl": "jdbc:h2:mem:test",
+                  "username": "sa",
+                  "password": "",
+                  "driver": "postgresql",
+                  "driverClass": "org.h2.Driver",
+                  "driverJar": "/h2.jar"
+                }
+              }
+            }
+            """
+        )
+
+        val result = inspectConfig(listOf(file))
+        val db = result.databases.getValue("db")
+
+        assertTrue(db.driverError!!.contains("both"), db.driverError)
+    }
+
+    @Test
+    fun `inspectConfig reports database without driver configuration`(@TempDir dir: Path) {
+        val file = writeJson(
+            dir, "databases.json",
+            """
+            {
+              "databases": {
+                "db": {
+                  "jdbcUrl": "jdbc:h2:mem:test",
+                  "username": "sa",
+                  "password": ""
+                }
+              }
+            }
+            """
+        )
+
+        val result = inspectConfig(listOf(file))
+        val db = result.databases.getValue("db")
+
+        assertTrue(db.driverError!!.contains("driver"), db.driverError)
+    }
+
     // ── inspectConfig (with controlled search paths) ─────────────────────────────
 
     @Test
@@ -422,5 +680,34 @@ class CoreTest {
         val result = inspectConfig(listOf(file, sameFile))
         // canonicalFile makes them the same, so distinct() keeps one
         assertEquals(1, result.searchedPaths.size)
+    }
+
+    @Test
+    fun `collectMissingDriverJars groups equivalent paths for the same source`() {
+        val relative = "missing-driver-${System.nanoTime()}.jar"
+        val absolute = File(relative).absolutePath
+        fun config(jar: String) = DatabaseConfig(
+            jdbcUrl = "jdbc:h2:mem:test",
+            username = "sa",
+            password = "",
+            driverClass = "org.h2.Driver",
+            driverJar = jar
+        )
+
+        val result = collectMissingDriverJars(
+            databases = mapOf(
+                "relative" to config(relative),
+                "absolute" to config(absolute)
+            ),
+            sourceOf = mapOf(
+                "relative" to "same.json",
+                "absolute" to "same.json"
+            ),
+            driverSourceOf = emptyMap()
+        )
+
+        val expected = MissingDriverJar(absolute, "same.json")
+        assertEquals(setOf(expected), result.keys)
+        assertEquals(listOf("absolute", "relative"), result.getValue(expected).sorted())
     }
 }

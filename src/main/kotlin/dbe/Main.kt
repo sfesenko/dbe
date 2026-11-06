@@ -63,17 +63,41 @@ private fun printConfigDiagnostic(diagnostic: ConfigDiagnostic, detailed: Boolea
             if (detailed) {
                 val names = source.databaseNames.ifEmpty { listOf("(none)") }
                 output.println("    databases: ${names.joinToString(", ")}")
+                if (source.driverNames.isNotEmpty()) {
+                    output.println("    drivers: ${source.driverNames.joinToString(", ")}")
+                }
                 val overridden = source.databaseNames.filter {
                     diagnostic.sourceOf[it] != source.path
                 }
                 if (overridden.isNotEmpty()) {
                     output.println("    overridden: ${overridden.joinToString(", ")}")
                 }
+                val overriddenDrivers = source.driverNames.filter {
+                    diagnostic.driverSourceOf[it] != source.path
+                }
+                if (overriddenDrivers.isNotEmpty()) {
+                    output.println("    overridden drivers: ${overriddenDrivers.joinToString(", ")}")
+                }
             }
         }
     }
 
     if (detailed) {
+        if (diagnostic.drivers.isNotEmpty()) {
+            output.println("Effective drivers:")
+            diagnostic.drivers.keys.sorted().forEach { name ->
+                val driver = diagnostic.drivers.getValue(name)
+                output.println("  $name  class=${driver.`class`}  jar=${driver.jar}")
+                diagnostic.driverSourceOf[name]?.let { source ->
+                    output.println("    source: ${displayPath(source)}")
+                }
+                val users = diagnostic.driverUsers[name].orEmpty()
+                if (users.isNotEmpty()) {
+                    output.println("    used by: ${users.joinToString(", ")}")
+                }
+            }
+        }
+
         output.println("Effective databases:")
         if (diagnostic.databases.isEmpty()) {
             output.println("  (none)")
@@ -81,7 +105,17 @@ private fun printConfigDiagnostic(diagnostic: ConfigDiagnostic, detailed: Boolea
             diagnostic.databases.keys.sorted().forEach { name ->
                 val config = diagnostic.databases.getValue(name)
                 val dialect = config.resolvedDialect() ?: "unknown"
-                output.println("  $name  dialect=$dialect  driverJar=${config.driverJar}")
+                val driver = when {
+                    config.driverName != null -> "driver=${config.driverName}"
+                    config.driverJar != null -> "driverJar=${config.driverJar}"
+                    else -> "driver=<missing>"
+                }
+                val error = config.driverError
+                    ?.lineSequence()
+                    ?.first()
+                    ?.let { "  error=$it" }
+                    .orEmpty()
+                output.println("  $name  dialect=$dialect  $driver$error")
             }
         }
     }
