@@ -24,7 +24,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <kotlin.version>2.4.10</kotlin.version>
         <jackson.version>3.2.4</jackson.version>
-        <mcp.version>1.0.0</mcp.version>
+        <mcp.version>2.1.0</mcp.version>
         <main.class>dbe.MainKt</main.class>
     </properties>
 
