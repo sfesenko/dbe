@@ -1,0 +1,17 @@
+{
+  "drivers": {
+    "h2": {
+      "class": "org.h2.Driver",
+      "jar": "~/.m2/repository/com/h2database/h2/2.3.232/h2-2.3.232.jar"
+    }
+  },
+  "databases": {
+    "local": {
+      "jdbcUrl": "jdbc:h2:mem:dbe;DB_CLOSE_DELAY=-1",
+      "username": "sa",
+      "password": "",
+      "dialect": "h2",
+      "driver": "h2"
+    }
+  }
+}

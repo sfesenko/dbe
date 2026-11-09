@@ -12,6 +12,14 @@
     <name>dbe - Database Explorer</name>
     <description>CLI and MCP server for executing SQL queries against configured JDBC databases</description>
 
+    <licenses>
+        <license>
+            <name>GNU General Public License v3.0</name>
+            <url>https://www.gnu.org/licenses/gpl-3.0.html</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <kotlin.version>2.4.10</kotlin.version>
