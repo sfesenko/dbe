@@ -504,7 +504,7 @@ class CoreTest {
         val db = result.databases.getValue("db")
 
         assertTrue(db.driverError!!.contains("missing-driver"), db.driverError)
-        assertTrue(db.driverError!!.contains("postgresql"), db.driverError)
+        assertTrue(db.driverError.contains("postgresql"), db.driverError)
         assertNull(db.driverClass)
         assertNull(db.driverJar)
     }
